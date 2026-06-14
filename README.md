@@ -24,7 +24,7 @@ Make sure you have [Node.js](https://nodejs.org/) installed (v16+ recommended).
    Create a `.env` file in this directory and specify your configuration (see `.env` template):
    ```env
    PORT=5000
-   WHATSAPP_PHONE=917812864905
+   WHATSAPP_PHONE=918220952580
    CALLMEBOT_API_KEY=your_key_here
    ```
 

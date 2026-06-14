@@ -89,7 +89,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 // Baileys WhatsApp Notification Helper
 async function sendWhatsAppNotification(booking) {
-  const targetPhone = process.env.WHATSAPP_PHONE || '917812864905';
+  const targetPhone = process.env.WHATSAPP_PHONE || '918220952580';
   const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
   // Format message text matching user requirements
