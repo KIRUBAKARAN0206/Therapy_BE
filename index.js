@@ -4,13 +4,21 @@ import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
-import { connectToWhatsApp, sendWhatsAppNotification as sendBaileysNotification, getWhatsAppStatus } from './whatsapp.js';
+import { connectToWhatsApp, sendWhatsAppNotification as sendBaileysNotification, getWhatsAppStatus, resetWhatsAppAuth } from './whatsapp.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Initialize dotenv configuration
 dotenv.config();
+
+// Register global error handlers to prevent unhandled rejections/exceptions from crashing the server
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ [Global Unhandled Rejection] at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('⚠️ [Global Uncaught Exception] thrown:', error);
+});
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -182,6 +190,23 @@ app.delete('/api/inquiries/:id', (req, res) => {
    BOOKINGS API ENDPOINTS
    ========================================================================== */
 
+// GET /api/bookings/booked-slots
+app.get('/api/bookings/booked-slots', (req, res) => {
+  const { date } = req.query;
+  if (!date) {
+    return res.status(400).json({ error: 'Date is required.' });
+  }
+  const query = `SELECT timeSlot FROM bookings WHERE date = ? AND status != 'Cancelled'`;
+  db.all(query, [date], (err, rows) => {
+    if (err) {
+      console.error('Error fetching booked slots:', err.message);
+      return res.status(500).json({ error: 'Internal server error.' });
+    }
+    const bookedSlots = rows.map(row => row.timeSlot);
+    res.json(bookedSlots);
+  });
+});
+
 // GET /api/bookings
 app.get('/api/bookings', (req, res) => {
   const query = `SELECT * FROM bookings ORDER BY createdAt DESC`;
@@ -291,6 +316,21 @@ app.post('/api/admin/whatsapp-reconnect', (req, res) => {
   } catch (error) {
     console.error('Error triggering WhatsApp reconnect:', error.message);
     res.status(500).json({ error: 'Failed to trigger reconnect sequence.' });
+  }
+});
+
+// POST /api/admin/whatsapp-reset
+app.post('/api/admin/whatsapp-reset', async (req, res) => {
+  try {
+    const success = await resetWhatsAppAuth(db);
+    if (success) {
+      res.json({ success: true, message: 'WhatsApp authentication reset and reconnection sequence triggered.' });
+    } else {
+      res.status(500).json({ error: 'Failed to fully reset WhatsApp auth.' });
+    }
+  } catch (error) {
+    console.error('Error resetting WhatsApp auth:', error.message);
+    res.status(500).json({ error: 'Failed to trigger reset sequence.' });
   }
 });
 

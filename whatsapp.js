@@ -134,7 +134,9 @@ export async function connectToWhatsApp(db) {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: ['THE THERAPY UNIVERSE', 'Chrome', '1.0.0']
+      browser: ['THE THERAPY UNIVERSE', 'Chrome', '1.0.0'],
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => false
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -250,4 +252,55 @@ export function getWhatsAppStatus() {
     isConnected,
     qrCode: isConnected ? null : currentQr
   };
+}
+
+export async function resetWhatsAppAuth(db) {
+  const targetDb = db || database;
+  if (!targetDb) {
+    console.error('Cannot reset WhatsApp auth: Database not initialized.');
+    return false;
+  }
+
+  // Clear any existing reconnect timeout
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+
+  // Clean up old socket connection
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners('connection.update');
+      sock.ev.removeAllListeners('creds.update');
+      sock.end(new Error('Resetting connection'));
+    } catch (err) {
+      // Ignore
+    }
+    sock = null;
+  }
+
+  isConnected = false;
+  currentQr = null;
+
+  try {
+    // Clear whatsapp_auth_state table completely
+    await new Promise((resolve, reject) => {
+      targetDb.run('DELETE FROM whatsapp_auth_state', [], (err) => {
+        if (err) {
+          console.error('[WhatsApp Auth Reset] Error clearing auth state table:', err.message);
+          reject(err);
+        } else {
+          console.log('[WhatsApp Auth Reset] Cleared all auth state credentials.');
+          resolve();
+        }
+      });
+    });
+
+    // Connect with a fresh session
+    await connectToWhatsApp(targetDb);
+    return true;
+  } catch (err) {
+    console.error('[WhatsApp Auth Reset] Reset failed:', err.message);
+    return false;
+  }
 }
