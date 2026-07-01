@@ -95,12 +95,11 @@ const db = new sqlite3.Database(dbPath, (err) => {
   }
 });
 
-// Baileys WhatsApp Notification Helper
+// Baileys WhatsApp Notification Helper — In-clinic Appointment
 async function sendWhatsAppNotification(booking) {
   const targetPhone = process.env.WHATSAPP_PHONE || '918220952580';
   const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-  // Format message text matching user requirements
   const text = 
     `🚨 *THE THERAPY UNIVERSE - New Appointment Request* 🚨\n\n` +
     `👤 *Patient Name:* ${booking.name}\n` +
@@ -108,9 +107,29 @@ async function sendWhatsAppNotification(booking) {
     `📧 *Email Address:* ${booking.email}\n` +
     `💆‍♂️ *Requested Service:* ${booking.service}\n` +
     `📅 *Preferred Date:* ${booking.date}\n` +
-    `🕒 *Preferred Time Slot:* ${booking.timeSlot}\n` +
     `📝 *Notes / Describe Symptoms:* ${booking.message || 'None'}\n\n` +
     `🔔 *Status:* ${booking.status}\n` +
+    `⏰ *Submitted At:* ${timestamp}`;
+
+  return await sendBaileysNotification(targetPhone, text);
+}
+
+// Baileys WhatsApp Notification Helper — Online Consultation
+async function sendOnlineConsultWhatsAppNotification(booking) {
+  const targetPhone = process.env.WHATSAPP_PHONE || '918220952580';
+  const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+  const text =
+    `🌐 *THE THERAPY UNIVERSE - New Online Consultation Request* 🌐\n\n` +
+    `👤 *Patient Name:* ${booking.name}\n` +
+    `📞 *Phone Number:* ${booking.phone}\n` +
+    `📧 *Email Address:* ${booking.email}\n` +
+    `📍 *Patient Location:* ${booking.location || 'Not specified'}\n` +
+    `💻 *Video Platform:* ${booking.platform || 'Not specified'}\n` +
+    `📅 *Preferred Date:* ${booking.date}\n` +
+    `🕒 *Preferred Time Slot:* ${booking.timeSlot || 'Not specified'}\n` +
+    `📝 *Symptoms / History:* ${booking.message || 'None'}\n\n` +
+    `🔔 *Status:* Pending\n` +
     `⏰ *Submitted At:* ${timestamp}`;
 
   return await sendBaileysNotification(targetPhone, text);
@@ -223,7 +242,7 @@ app.get('/api/bookings', (req, res) => {
 app.post('/api/bookings', (req, res) => {
   const { name, email, phone, service, date, timeSlot, message, status } = req.body;
 
-  if (!name || !email || !phone || !service || !date || !timeSlot) {
+  if (!name || !email || !phone || !service || !date) {
     return res.status(400).json({ error: 'Please provide all required booking fields.' });
   }
 
@@ -231,7 +250,7 @@ app.post('/api/bookings', (req, res) => {
     INSERT INTO bookings (name, email, phone, service, date, timeSlot, message, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `;
-  const params = [name, email, phone, service, date, timeSlot, message || '', status || 'Pending'];
+  const params = [name, email, phone, service, date, timeSlot || '', message || '', status || 'Pending'];
 
   db.run(query, params, function (err) {
     if (err) {
@@ -248,6 +267,55 @@ app.post('/api/bookings', (req, res) => {
 
       // Send automated WhatsApp notification
       const whatsappSuccess = await sendWhatsAppNotification(row);
+
+      res.status(201).json({
+        success: true,
+        booking: row,
+        whatsappFailed: !whatsappSuccess
+      });
+    });
+  });
+});
+
+/* ==========================================================================
+   ONLINE CONSULTATION BOOKING ENDPOINT
+   ========================================================================== */
+
+// POST /api/online-bookings
+app.post('/api/online-bookings', (req, res) => {
+  const { name, email, phone, location, platform, date, timeSlot, message } = req.body;
+
+  if (!name || !email || !phone || !date) {
+    return res.status(400).json({ error: 'Please provide all required fields for online consultation.' });
+  }
+
+  // Store in the same bookings table with service = 'Online Consultation'
+  const service = `Online Consultation${platform ? ` (${platform})` : ''}${location ? ` — ${location}` : ''}`;
+  const query = `
+    INSERT INTO bookings (name, email, phone, service, date, timeSlot, message, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+  const params = [name, email, phone, service, date, timeSlot || 'Not specified', message || '', 'Pending'];
+
+  db.run(query, params, function (err) {
+    if (err) {
+      console.error('Error inserting online booking:', err.message);
+      return res.status(500).json({ error: 'Failed to save online consultation request.' });
+    }
+
+    const insertedId = this.lastID;
+
+    db.get('SELECT * FROM bookings WHERE id = ?', [insertedId], async (err, row) => {
+      if (err || !row) {
+        return res.status(201).json({ success: true, id: insertedId, whatsappFailed: true });
+      }
+
+      // Send dedicated Online Consultation WhatsApp notification
+      const whatsappSuccess = await sendOnlineConsultWhatsAppNotification({
+        ...row,
+        platform,
+        location
+      });
 
       res.status(201).json({
         success: true,

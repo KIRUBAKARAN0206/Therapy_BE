@@ -139,6 +139,8 @@ export async function connectToWhatsApp(db) {
       shouldSyncHistoryMessage: () => false
     });
 
+    sock.ev.on('creds.update', saveCreds);
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       
