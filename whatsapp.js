@@ -1,4 +1,4 @@
-import makeWASocket, { DisconnectReason, proto } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, proto, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { initAuthCreds } from '@whiskeysockets/baileys/lib/Utils/auth-utils.js';
@@ -130,11 +130,15 @@ export async function connectToWhatsApp(db) {
     const { state, saveCreds } = await useSQLiteAuthState(database);
     const makeWASocketFn = makeWASocket.default || makeWASocket;
 
+    const { version, isLatest } = await fetchLatestWaWebVersion();
+    console.log(`[WhatsApp] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+
     sock = makeWASocketFn({
+      version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: ['THE THERAPY UNIVERSE', 'Chrome', '1.0.0'],
+      browser: ['Ubuntu', 'Chrome', '20.0.04'],
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false
     });
