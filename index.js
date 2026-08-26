@@ -3,6 +3,7 @@ import cors from 'cors';
 import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { connectToWhatsApp, sendWhatsAppNotification as sendBaileysNotification, getWhatsAppStatus, resetWhatsAppAuth } from './whatsapp.js';
 
@@ -27,6 +28,15 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Ensure uploads/gallery directory exists
+const uploadsGalleryPath = path.join(__dirname, 'uploads', 'gallery');
+if (!fs.existsSync(uploadsGalleryPath)) {
+  fs.mkdirSync(uploadsGalleryPath, { recursive: true });
+}
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Initialize SQLite Database
 const dbPath = path.join(__dirname, 'database.sqlite');
@@ -406,32 +416,90 @@ app.post('/api/gallery', (req, res) => {
     return res.status(400).json({ error: 'ID and URL are required.' });
   }
 
+  let fileUrl = url;
+  
+  // If url is base64, save it as a file
+  if (url.startsWith('data:')) {
+    try {
+      const matches = url.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      if (matches && matches.length === 3) {
+        const type = matches[1];
+        const data = Buffer.from(matches[2], 'base64');
+        
+        let ext = 'webp';
+        if (type.includes('png')) ext = 'png';
+        else if (type.includes('jpeg') || type.includes('jpg')) ext = 'jpg';
+        else if (type.includes('mp4')) ext = 'mp4';
+        else if (type.includes('webm')) ext = 'webm';
+        
+        const filename = `${id}.${ext}`;
+        const filepath = path.join(__dirname, 'uploads', 'gallery', filename);
+        
+        fs.writeFileSync(filepath, data);
+        fileUrl = `/uploads/gallery/${filename}`;
+      }
+    } catch (err) {
+      console.error('Error saving base64 image to file:', err);
+      return res.status(500).json({ error: 'Failed to process image file.' });
+    }
+  }
+
   const query = `INSERT INTO gallery_images (id, title, category, url) VALUES (?, ?, ?, ?)`;
-  const params = [id, title || 'Untitled', category || 'General', url];
+  const params = [id, title || 'Untitled', category || 'General', fileUrl];
 
   db.run(query, params, function (err) {
     if (err) {
       console.error('Error inserting gallery image:', err.message);
       return res.status(500).json({ error: 'Failed to save gallery image.' });
     }
-    res.status(201).json({ success: true, message: 'Image uploaded successfully.' });
+    
+    // Return the inserted photo data so the frontend can use the permanent URL
+    res.status(201).json({ 
+      success: true, 
+      message: 'Image uploaded successfully.',
+      photo: {
+        id,
+        title: title || 'Untitled',
+        category: category || 'General',
+        url: fileUrl
+      }
+    });
   });
 });
 
 // DELETE /api/gallery/:id
 app.delete('/api/gallery/:id', (req, res) => {
   const { id } = req.params;
-  const query = `DELETE FROM gallery_images WHERE id = ?`;
-
-  db.run(query, [id], function (err) {
+  
+  // First, find the image to delete the file
+  db.get('SELECT url FROM gallery_images WHERE id = ?', [id], (err, row) => {
     if (err) {
-      console.error('Error deleting gallery image:', err.message);
-      return res.status(500).json({ error: 'Failed to delete gallery image.' });
+      console.error('Error finding gallery image for deletion:', err.message);
+      return res.status(500).json({ error: 'Database error.' });
     }
-    if (this.changes === 0) {
-      return res.status(404).json({ error: 'Gallery image not found.' });
+    
+    if (row && row.url && row.url.startsWith('/uploads/')) {
+      try {
+        const filepath = path.join(__dirname, row.url);
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+      } catch (fileErr) {
+        console.error('Error deleting image file:', fileErr);
+      }
     }
-    res.json({ success: true, message: 'Image deleted successfully.' });
+
+    const query = `DELETE FROM gallery_images WHERE id = ?`;
+    db.run(query, [id], function (err) {
+      if (err) {
+        console.error('Error deleting gallery image:', err.message);
+        return res.status(500).json({ error: 'Failed to delete gallery image.' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Gallery image not found.' });
+      }
+      res.json({ success: true, message: 'Image deleted successfully.' });
+    });
   });
 });
 
