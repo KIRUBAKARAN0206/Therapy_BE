@@ -25,7 +25,8 @@ const PORT = process.env.PORT || 5000;
 
 // Enable CORS and JSON parsing middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Initialize SQLite Database
 const dbPath = path.join(__dirname, 'database.sqlite');
@@ -90,6 +91,23 @@ const db = new sqlite3.Database(dbPath, (err) => {
         console.log('WhatsApp auth state table ready.');
         // Connect Baileys WhatsApp bot
         connectToWhatsApp(db);
+      }
+    });
+
+    // Create Gallery Images table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS gallery_images (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        category TEXT,
+        url TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) {
+        console.error('Error creating gallery_images table:', err.message);
+      } else {
+        console.log('Gallery images table ready.');
       }
     });
   }
@@ -362,6 +380,58 @@ app.delete('/api/bookings/:id', (req, res) => {
       return res.status(404).json({ error: 'Booking not found.' });
     }
     res.json({ success: true });
+  });
+});
+
+/* ==========================================================================
+   GALLERY API ENDPOINTS
+   ========================================================================== */
+
+// GET /api/gallery
+app.get('/api/gallery', (req, res) => {
+  const query = `SELECT * FROM gallery_images ORDER BY createdAt DESC`;
+  db.all(query, [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching gallery images:', err.message);
+      return res.status(500).json({ error: 'Internal server error.' });
+    }
+    res.json(rows);
+  });
+});
+
+// POST /api/gallery
+app.post('/api/gallery', (req, res) => {
+  const { id, title, category, url } = req.body;
+  if (!id || !url) {
+    return res.status(400).json({ error: 'ID and URL are required.' });
+  }
+
+  const query = `INSERT INTO gallery_images (id, title, category, url) VALUES (?, ?, ?, ?)`;
+  const params = [id, title || 'Untitled', category || 'General', url];
+
+  db.run(query, params, function (err) {
+    if (err) {
+      console.error('Error inserting gallery image:', err.message);
+      return res.status(500).json({ error: 'Failed to save gallery image.' });
+    }
+    res.status(201).json({ success: true, message: 'Image uploaded successfully.' });
+  });
+});
+
+// DELETE /api/gallery/:id
+app.delete('/api/gallery/:id', (req, res) => {
+  const { id } = req.params;
+  const query = `DELETE FROM gallery_images WHERE id = ?`;
+
+  db.run(query, [id], function (err) {
+    if (err) {
+      console.error('Error deleting gallery image:', err.message);
+      return res.status(500).json({ error: 'Failed to delete gallery image.' });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'Gallery image not found.' });
+    }
+    res.json({ success: true, message: 'Image deleted successfully.' });
   });
 });
 
