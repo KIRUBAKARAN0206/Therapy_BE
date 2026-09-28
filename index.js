@@ -42,13 +42,17 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Initialize PostgreSQL Connection Pool
 const poolConfig = process.env.DATABASE_URL
-  ? { connectionString: process.env.DATABASE_URL }
+  ? { 
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
+    }
   : {
       user: process.env.PGUSER || 'postgres',
       host: process.env.PGHOST || 'localhost',
       database: process.env.PGDATABASE || 'therapy_db',
       password: process.env.PGPASSWORD || 'postgres',
       port: parseInt(process.env.PGPORT || '5432', 10),
+      ssl: false
     };
 
 const pool = new Pool(poolConfig);
