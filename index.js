@@ -1,11 +1,13 @@
 import express from 'express';
 import cors from 'cors';
-import sqlite3 from 'sqlite3';
+import pg from 'pg';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { connectToWhatsApp, sendWhatsAppNotification as sendBaileysNotification, getWhatsAppStatus, resetWhatsAppAuth } from './whatsapp.js';
+
+const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,90 +40,70 @@ if (!fs.existsSync(uploadsGalleryPath)) {
 // Serve static files from uploads directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Initialize SQLite Database
-const dbPath = path.join(__dirname, 'database.sqlite');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to SQLite database at:', dbPath);
-    
-    // Create Inquiries table
-    db.run(`
+// Initialize PostgreSQL Connection Pool
+const poolConfig = process.env.DATABASE_URL
+  ? { connectionString: process.env.DATABASE_URL }
+  : {
+      user: process.env.PGUSER || 'postgres',
+      host: process.env.PGHOST || 'localhost',
+      database: process.env.PGDATABASE || 'therapy_db',
+      password: process.env.PGPASSWORD || 'postgres',
+      port: parseInt(process.env.PGPORT || '5432', 10),
+    };
+
+const pool = new Pool(poolConfig);
+
+// Initialize Database Tables
+async function initDb() {
+  try {
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS inquiries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        firstName TEXT NOT NULL,
-        lastName TEXT NOT NULL,
-        email TEXT NOT NULL,
-        phone TEXT,
-        subject TEXT,
+        id SERIAL PRIMARY KEY,
+        "firstName" VARCHAR(255) NOT NULL,
+        "lastName" VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        phone VARCHAR(100),
+        subject VARCHAR(255),
         message TEXT NOT NULL,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
-      if (err) {
-        console.error('Error creating inquiries table:', err.message);
-      } else {
-        console.log('Inquiries table ready.');
-      }
-    });
+        "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
 
-    // Create Bookings table
-    db.run(`
       CREATE TABLE IF NOT EXISTS bookings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        phone TEXT NOT NULL,
-        service TEXT NOT NULL,
-        date TEXT NOT NULL,
-        timeSlot TEXT NOT NULL,
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        phone VARCHAR(100) NOT NULL,
+        service VARCHAR(255) NOT NULL,
+        date VARCHAR(100) NOT NULL,
+        "timeSlot" VARCHAR(100) NOT NULL,
         message TEXT,
-        status TEXT DEFAULT 'Pending',
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
-      if (err) {
-        console.error('Error creating bookings table:', err.message);
-      } else {
-        console.log('Bookings table ready.');
-      }
-    });
+        status VARCHAR(100) DEFAULT 'Pending',
+        "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
 
-    // Create WhatsApp Auth State table
-    db.run(`
       CREATE TABLE IF NOT EXISTS whatsapp_auth_state (
         id TEXT PRIMARY KEY,
         value TEXT NOT NULL
-      )
-    `, (err) => {
-      if (err) {
-        console.error('Error creating whatsapp_auth_state table:', err.message);
-      } else {
-        console.log('WhatsApp auth state table ready.');
-        // Connect Baileys WhatsApp bot
-        connectToWhatsApp(db);
-      }
-    });
+      );
 
-    // Create Gallery Images table
-    db.run(`
       CREATE TABLE IF NOT EXISTS gallery_images (
         id TEXT PRIMARY KEY,
-        title TEXT,
-        category TEXT,
+        title VARCHAR(255),
+        category VARCHAR(255),
         url TEXT,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
-      if (err) {
-        console.error('Error creating gallery_images table:', err.message);
-      } else {
-        console.log('Gallery images table ready.');
-      }
-    });
+        "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✅ Connected to PostgreSQL and verified database tables.');
+    // Connect Baileys WhatsApp bot
+    connectToWhatsApp(pool);
+  } catch (err) {
+    console.error('⚠️ PostgreSQL connection/initialization error:', err.message);
+    console.error('Make sure PostgreSQL server is running and database exists!');
   }
-});
+}
+
+initDb();
 
 // Baileys WhatsApp Notification Helper — In-clinic Appointment
 async function sendWhatsAppNotification(booking) {
@@ -167,7 +149,7 @@ async function sendOnlineConsultWhatsAppNotification(booking) {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    message: 'THE THERAPY UNIVERSE backend API is running.'
+    message: 'THE THERAPY UNIVERSE backend API is running with PostgreSQL.'
   });
 });
 
@@ -176,61 +158,52 @@ app.get('/', (req, res) => {
    ========================================================================== */
 
 // GET /api/inquiries
-app.get('/api/inquiries', (req, res) => {
-  const query = `SELECT * FROM inquiries ORDER BY createdAt DESC`;
-  db.all(query, [], (err, rows) => {
-    if (err) {
-      console.error('Error fetching inquiries:', err.message);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
+app.get('/api/inquiries', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM inquiries ORDER BY "createdAt" DESC');
     res.json(rows);
-  });
+  } catch (err) {
+    console.error('Error fetching inquiries:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // POST /api/inquiries
-app.post('/api/inquiries', (req, res) => {
+app.post('/api/inquiries', async (req, res) => {
   const { firstName, lastName, email, phone, subject, message } = req.body;
 
   if (!firstName || !lastName || !email || !message) {
     return res.status(400).json({ error: 'Please fill in all required fields.' });
   }
 
-  const query = `
-    INSERT INTO inquiries (firstName, lastName, email, phone, subject, message)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `;
-  const params = [firstName, lastName, email, phone || '', subject || 'General Inquiry', message];
-
-  db.run(query, params, function (err) {
-    if (err) {
-      console.error('Error inserting inquiry:', err.message);
-      return res.status(500).json({ error: 'Failed to save inquiry to database.' });
-    }
-    
-    db.get('SELECT * FROM inquiries WHERE id = ?', [this.lastID], (err, row) => {
-      if (err) {
-        return res.status(201).json({ success: true, id: this.lastID });
-      }
-      res.status(201).json({ success: true, inquiry: row });
-    });
-  });
+  try {
+    const query = `
+      INSERT INTO inquiries ("firstName", "lastName", email, phone, subject, message)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `;
+    const params = [firstName, lastName, email, phone || '', subject || 'General Inquiry', message];
+    const { rows } = await pool.query(query, params);
+    res.status(201).json({ success: true, inquiry: rows[0] });
+  } catch (err) {
+    console.error('Error inserting inquiry:', err.message);
+    res.status(500).json({ error: 'Failed to save inquiry to database.' });
+  }
 });
 
 // DELETE /api/inquiries/:id
-app.delete('/api/inquiries/:id', (req, res) => {
+app.delete('/api/inquiries/:id', async (req, res) => {
   const { id } = req.params;
-  const query = `DELETE FROM inquiries WHERE id = ?`;
-
-  db.run(query, [id], function (err) {
-    if (err) {
-      console.error(`Error deleting inquiry:`, err.message);
-      return res.status(500).json({ error: 'Failed to delete inquiry.' });
-    }
-    if (this.changes === 0) {
+  try {
+    const result = await pool.query('DELETE FROM inquiries WHERE id = $1', [id]);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Inquiry not found.' });
     }
-    res.json({ success: true, message: `Inquiry deleted successfully.` });
-  });
+    res.json({ success: true, message: 'Inquiry deleted successfully.' });
+  } catch (err) {
+    console.error(`Error deleting inquiry:`, err.message);
+    res.status(500).json({ error: 'Failed to delete inquiry.' });
+  }
 });
 
 /* ==========================================================================
@@ -238,71 +211,62 @@ app.delete('/api/inquiries/:id', (req, res) => {
    ========================================================================== */
 
 // GET /api/bookings/booked-slots
-app.get('/api/bookings/booked-slots', (req, res) => {
+app.get('/api/bookings/booked-slots', async (req, res) => {
   const { date } = req.query;
   if (!date) {
     return res.status(400).json({ error: 'Date is required.' });
   }
-  const query = `SELECT timeSlot FROM bookings WHERE date = ? AND status != 'Cancelled'`;
-  db.all(query, [date], (err, rows) => {
-    if (err) {
-      console.error('Error fetching booked slots:', err.message);
-      return res.status(500).json({ error: 'Internal server error.' });
-    }
+  try {
+    const { rows } = await pool.query('SELECT "timeSlot" FROM bookings WHERE date = $1 AND status != \'Cancelled\'', [date]);
     const bookedSlots = rows.map(row => row.timeSlot);
     res.json(bookedSlots);
-  });
+  } catch (err) {
+    console.error('Error fetching booked slots:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
 });
 
 // GET /api/bookings
-app.get('/api/bookings', (req, res) => {
-  const query = `SELECT * FROM bookings ORDER BY createdAt DESC`;
-  db.all(query, [], (err, rows) => {
-    if (err) {
-      console.error('Error fetching bookings:', err.message);
-      return res.status(500).json({ error: 'Internal server error.' });
-    }
+app.get('/api/bookings', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM bookings ORDER BY "createdAt" DESC');
     res.json(rows);
-  });
+  } catch (err) {
+    console.error('Error fetching bookings:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
 });
 
 // POST /api/bookings
-app.post('/api/bookings', (req, res) => {
+app.post('/api/bookings', async (req, res) => {
   const { name, email, phone, service, date, timeSlot, message, status } = req.body;
 
   if (!name || !email || !phone || !service || !date) {
     return res.status(400).json({ error: 'Please provide all required booking fields.' });
   }
 
-  const query = `
-    INSERT INTO bookings (name, email, phone, service, date, timeSlot, message, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
-  const params = [name, email, phone, service, date, timeSlot || '', message || '', status || 'Pending'];
+  try {
+    const query = `
+      INSERT INTO bookings (name, email, phone, service, date, "timeSlot", message, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `;
+    const params = [name, email, phone, service, date, timeSlot || '', message || '', status || 'Pending'];
+    const { rows } = await pool.query(query, params);
+    const row = rows[0];
 
-  db.run(query, params, function (err) {
-    if (err) {
-      console.error('Error inserting booking:', err.message);
-      return res.status(500).json({ error: 'Failed to save appointment.' });
-    }
+    // Send automated WhatsApp notification
+    const whatsappSuccess = await sendWhatsAppNotification(row);
 
-    const insertedId = this.lastID;
-    
-    db.get('SELECT * FROM bookings WHERE id = ?', [insertedId], async (err, row) => {
-      if (err || !row) {
-        return res.status(201).json({ success: true, id: insertedId, whatsappFailed: true });
-      }
-
-      // Send automated WhatsApp notification
-      const whatsappSuccess = await sendWhatsAppNotification(row);
-
-      res.status(201).json({
-        success: true,
-        booking: row,
-        whatsappFailed: !whatsappSuccess
-      });
+    res.status(201).json({
+      success: true,
+      booking: row,
+      whatsappFailed: !whatsappSuccess
     });
-  });
+  } catch (err) {
+    console.error('Error inserting booking:', err.message);
+    res.status(500).json({ error: 'Failed to save appointment.' });
+  }
 });
 
 /* ==========================================================================
@@ -310,7 +274,7 @@ app.post('/api/bookings', (req, res) => {
    ========================================================================== */
 
 // POST /api/online-bookings
-app.post('/api/online-bookings', (req, res) => {
+app.post('/api/online-bookings', async (req, res) => {
   const { name, email, phone, location, platform, date, timeSlot, message } = req.body;
 
   if (!name || !email || !phone || !date) {
@@ -319,43 +283,36 @@ app.post('/api/online-bookings', (req, res) => {
 
   // Store in the same bookings table with service = 'Online Consultation'
   const service = `Online Consultation${platform ? ` (${platform})` : ''}${location ? ` — ${location}` : ''}`;
-  const query = `
-    INSERT INTO bookings (name, email, phone, service, date, timeSlot, message, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
-  const params = [name, email, phone, service, date, timeSlot || 'Not specified', message || '', 'Pending'];
+  try {
+    const query = `
+      INSERT INTO bookings (name, email, phone, service, date, "timeSlot", message, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `;
+    const params = [name, email, phone, service, date, timeSlot || 'Not specified', message || '', 'Pending'];
+    const { rows } = await pool.query(query, params);
+    const row = rows[0];
 
-  db.run(query, params, function (err) {
-    if (err) {
-      console.error('Error inserting online booking:', err.message);
-      return res.status(500).json({ error: 'Failed to save online consultation request.' });
-    }
-
-    const insertedId = this.lastID;
-
-    db.get('SELECT * FROM bookings WHERE id = ?', [insertedId], async (err, row) => {
-      if (err || !row) {
-        return res.status(201).json({ success: true, id: insertedId, whatsappFailed: true });
-      }
-
-      // Send dedicated Online Consultation WhatsApp notification
-      const whatsappSuccess = await sendOnlineConsultWhatsAppNotification({
-        ...row,
-        platform,
-        location
-      });
-
-      res.status(201).json({
-        success: true,
-        booking: row,
-        whatsappFailed: !whatsappSuccess
-      });
+    // Send dedicated Online Consultation WhatsApp notification
+    const whatsappSuccess = await sendOnlineConsultWhatsAppNotification({
+      ...row,
+      platform,
+      location
     });
-  });
+
+    res.status(201).json({
+      success: true,
+      booking: row,
+      whatsappFailed: !whatsappSuccess
+    });
+  } catch (err) {
+    console.error('Error inserting online booking:', err.message);
+    res.status(500).json({ error: 'Failed to save online consultation request.' });
+  }
 });
 
 // PUT /api/bookings/:id (Update status)
-app.put('/api/bookings/:id', (req, res) => {
+app.put('/api/bookings/:id', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
@@ -363,34 +320,31 @@ app.put('/api/bookings/:id', (req, res) => {
     return res.status(400).json({ error: 'Status is required.' });
   }
 
-  const query = `UPDATE bookings SET status = ? WHERE id = ?`;
-  db.run(query, [status, id], function (err) {
-    if (err) {
-      console.error('Error updating booking status:', err.message);
-      return res.status(500).json({ error: 'Failed to update booking status.' });
-    }
-    if (this.changes === 0) {
+  try {
+    const result = await pool.query('UPDATE bookings SET status = $1 WHERE id = $2', [status, id]);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Booking not found.' });
     }
     res.json({ success: true });
-  });
+  } catch (err) {
+    console.error('Error updating booking status:', err.message);
+    res.status(500).json({ error: 'Failed to update booking status.' });
+  }
 });
 
 // DELETE /api/bookings/:id
-app.delete('/api/bookings/:id', (req, res) => {
+app.delete('/api/bookings/:id', async (req, res) => {
   const { id } = req.params;
-  const query = `DELETE FROM bookings WHERE id = ?`;
-
-  db.run(query, [id], function (err) {
-    if (err) {
-      console.error('Error deleting booking:', err.message);
-      return res.status(500).json({ error: 'Failed to delete booking.' });
-    }
-    if (this.changes === 0) {
+  try {
+    const result = await pool.query('DELETE FROM bookings WHERE id = $1', [id]);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Booking not found.' });
     }
     res.json({ success: true });
-  });
+  } catch (err) {
+    console.error('Error deleting booking:', err.message);
+    res.status(500).json({ error: 'Failed to delete booking.' });
+  }
 });
 
 /* ==========================================================================
@@ -398,19 +352,18 @@ app.delete('/api/bookings/:id', (req, res) => {
    ========================================================================== */
 
 // GET /api/gallery
-app.get('/api/gallery', (req, res) => {
-  const query = `SELECT * FROM gallery_images ORDER BY createdAt DESC`;
-  db.all(query, [], (err, rows) => {
-    if (err) {
-      console.error('Error fetching gallery images:', err.message);
-      return res.status(500).json({ error: 'Internal server error.' });
-    }
+app.get('/api/gallery', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM gallery_images ORDER BY "createdAt" DESC');
     res.json(rows);
-  });
+  } catch (err) {
+    console.error('Error fetching gallery images:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
 });
 
 // POST /api/gallery
-app.post('/api/gallery', (req, res) => {
+app.post('/api/gallery', async (req, res) => {
   const { id, title, category, url } = req.body;
   if (!id || !url) {
     return res.status(400).json({ error: 'ID and URL are required.' });
@@ -444,16 +397,11 @@ app.post('/api/gallery', (req, res) => {
     }
   }
 
-  const query = `INSERT INTO gallery_images (id, title, category, url) VALUES (?, ?, ?, ?)`;
-  const params = [id, title || 'Untitled', category || 'General', fileUrl];
+  try {
+    const query = 'INSERT INTO gallery_images (id, title, category, url) VALUES ($1, $2, $3, $4)';
+    const params = [id, title || 'Untitled', category || 'General', fileUrl];
+    await pool.query(query, params);
 
-  db.run(query, params, function (err) {
-    if (err) {
-      console.error('Error inserting gallery image:', err.message);
-      return res.status(500).json({ error: 'Failed to save gallery image.' });
-    }
-    
-    // Return the inserted photo data so the frontend can use the permanent URL
     res.status(201).json({ 
       success: true, 
       message: 'Image uploaded successfully.',
@@ -464,23 +412,21 @@ app.post('/api/gallery', (req, res) => {
         url: fileUrl
       }
     });
-  });
+  } catch (err) {
+    console.error('Error inserting gallery image:', err.message);
+    res.status(500).json({ error: 'Failed to save gallery image.' });
+  }
 });
 
 // DELETE /api/gallery/:id
-app.delete('/api/gallery/:id', (req, res) => {
+app.delete('/api/gallery/:id', async (req, res) => {
   const { id } = req.params;
   
-  // First, find the image to delete the file
-  db.get('SELECT url FROM gallery_images WHERE id = ?', [id], (err, row) => {
-    if (err) {
-      console.error('Error finding gallery image for deletion:', err.message);
-      return res.status(500).json({ error: 'Database error.' });
-    }
-    
-    if (row && row.url && row.url.startsWith('/uploads/')) {
+  try {
+    const { rows } = await pool.query('SELECT url FROM gallery_images WHERE id = $1', [id]);
+    if (rows.length > 0 && rows[0].url && rows[0].url.startsWith('/uploads/')) {
       try {
-        const filepath = path.join(__dirname, row.url);
+        const filepath = path.join(__dirname, rows[0].url);
         if (fs.existsSync(filepath)) {
           fs.unlinkSync(filepath);
         }
@@ -489,18 +435,15 @@ app.delete('/api/gallery/:id', (req, res) => {
       }
     }
 
-    const query = `DELETE FROM gallery_images WHERE id = ?`;
-    db.run(query, [id], function (err) {
-      if (err) {
-        console.error('Error deleting gallery image:', err.message);
-        return res.status(500).json({ error: 'Failed to delete gallery image.' });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Gallery image not found.' });
-      }
-      res.json({ success: true, message: 'Image deleted successfully.' });
-    });
-  });
+    const result = await pool.query('DELETE FROM gallery_images WHERE id = $1', [id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Gallery image not found.' });
+    }
+    res.json({ success: true, message: 'Image deleted successfully.' });
+  } catch (err) {
+    console.error('Error deleting gallery image:', err.message);
+    res.status(500).json({ error: 'Failed to delete gallery image.' });
+  }
 });
 
 // GET /api/admin/whatsapp-status
@@ -517,7 +460,7 @@ app.get('/api/admin/whatsapp-status', (req, res) => {
 // POST /api/admin/whatsapp-reconnect
 app.post('/api/admin/whatsapp-reconnect', (req, res) => {
   try {
-    connectToWhatsApp(db);
+    connectToWhatsApp(pool);
     res.json({ success: true, message: 'WhatsApp reconnect sequence triggered.' });
   } catch (error) {
     console.error('Error triggering WhatsApp reconnect:', error.message);
@@ -528,7 +471,7 @@ app.post('/api/admin/whatsapp-reconnect', (req, res) => {
 // POST /api/admin/whatsapp-reset
 app.post('/api/admin/whatsapp-reset', async (req, res) => {
   try {
-    const success = await resetWhatsAppAuth(db);
+    const success = await resetWhatsAppAuth(pool);
     if (success) {
       res.json({ success: true, message: 'WhatsApp authentication reset and reconnection sequence triggered.' });
     } else {
@@ -542,5 +485,5 @@ app.post('/api/admin/whatsapp-reset', async (req, res) => {
 
 // Start backend server
 app.listen(PORT, () => {
-  console.log(`Backend server is running on http://localhost:${PORT}`);
+  console.log(`Backend server is running on http://localhost:${PORT} with PostgreSQL`);
 });

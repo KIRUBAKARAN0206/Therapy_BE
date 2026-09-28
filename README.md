@@ -1,17 +1,17 @@
 # THE THERAPY UNIVERSE - Backend API Server
 
-This is the backend API server for **THE THERAPY UNIVERSE** clinic application. Built with Node.js, Express, and SQLite3.
+This is the backend API server for **THE THERAPY UNIVERSE** clinic application. Built with Node.js, Express, and PostgreSQL.
 
 ## Features
 
 - **Inquiries API:** Manages client message inquiries.
 - **Bookings API:** Handles appointment scheduling and tracking.
-- **WhatsApp Integration:** Automatically sends notifications to the clinic phone using CallMeBot.
-- **SQLite Database:** Local self-contained lightweight database.
+- **WhatsApp Integration:** Automatically sends notifications to the clinic phone using Baileys WhatsApp Web API.
+- **PostgreSQL Database:** Production-grade relational database.
 
 ## Prerequisites
 
-Make sure you have [Node.js](https://nodejs.org/) installed (v16+ recommended).
+Make sure you have [Node.js](https://nodejs.org/) installed (v16+ recommended) and a PostgreSQL database (local or cloud like Supabase/Neon).
 
 ## Setup & Installation
 
@@ -21,11 +21,11 @@ Make sure you have [Node.js](https://nodejs.org/) installed (v16+ recommended).
    ```
 
 2. Configure Environment Variables:
-   Create a `.env` file in this directory and specify your configuration (see `.env` template):
+   Create a `.env` file in this directory and specify your configuration:
    ```env
    PORT=5000
    WHATSAPP_PHONE=918220952580
-   CALLMEBOT_API_KEY=your_key_here
+   DATABASE_URL=postgres://postgres:postgres@localhost:5432/therapy_db
    ```
 
 3. Run the Server:
@@ -39,4 +39,5 @@ Make sure you have [Node.js](https://nodejs.org/) installed (v16+ recommended).
      npm start
      ```
 
-   The server will run at `http://localhost:5000` and automatically create a `database.sqlite` file if it doesn't exist.
+   The server will run at `http://localhost:5000` and automatically connect to PostgreSQL and initialize database tables.
+

@@ -10,36 +10,26 @@ let currentQr = null;
 let database = null;
 let reconnectTimeout = null;
 
-// Helper to wrap Baileys SQLite Authentication State
-export async function useSQLiteAuthState(db) {
+// Helper to wrap Baileys PostgreSQL Authentication State
+export async function usePgAuthState(db) {
   const writeData = async (data, id) => {
     const value = JSON.stringify(data, BufferJSON.replacer);
-    return new Promise((resolve, reject) => {
-      db.run(
-        'INSERT INTO whatsapp_auth_state (id, value) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value',
-        [id, value],
-        (err) => {
-          if (err) {
-            console.error('[WhatsApp Auth] Error writing state key:', id, err.message);
-            reject(err);
-          } else {
-            resolve();
-          }
-        }
+    try {
+      await db.query(
+        'INSERT INTO whatsapp_auth_state (id, value) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value',
+        [id, value]
       );
-    });
+    } catch (err) {
+      console.error('[WhatsApp Auth] Error writing state key:', id, err.message);
+      throw err;
+    }
   };
 
   const readData = async (id) => {
     try {
-      const row = await new Promise((resolve, reject) => {
-        db.get('SELECT value FROM whatsapp_auth_state WHERE id = ?', [id], (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        });
-      });
-      if (!row) return null;
-      return JSON.parse(row.value, BufferJSON.reviver);
+      const res = await db.query('SELECT value FROM whatsapp_auth_state WHERE id = $1', [id]);
+      if (!res.rows || res.rows.length === 0) return null;
+      return JSON.parse(res.rows[0].value, BufferJSON.reviver);
     } catch (error) {
       return null;
     }
@@ -47,16 +37,12 @@ export async function useSQLiteAuthState(db) {
 
   const removeData = async (id) => {
     try {
-      await new Promise((resolve, reject) => {
-        db.run('DELETE FROM whatsapp_auth_state WHERE id = ?', [id], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
+      await db.query('DELETE FROM whatsapp_auth_state WHERE id = $1', [id]);
     } catch (error) {
       // Ignore
     }
   };
+
 
   const creds = (await readData('creds')) || initAuthCreds();
 
@@ -127,7 +113,7 @@ export async function connectToWhatsApp(db) {
   }
 
   try {
-    const { state, saveCreds } = await useSQLiteAuthState(database);
+    const { state, saveCreds } = await usePgAuthState(database);
     const makeWASocketFn = makeWASocket.default || makeWASocket;
 
     const { version, isLatest } = await fetchLatestWaWebVersion();
@@ -290,17 +276,8 @@ export async function resetWhatsAppAuth(db) {
 
   try {
     // Clear whatsapp_auth_state table completely
-    await new Promise((resolve, reject) => {
-      targetDb.run('DELETE FROM whatsapp_auth_state', [], (err) => {
-        if (err) {
-          console.error('[WhatsApp Auth Reset] Error clearing auth state table:', err.message);
-          reject(err);
-        } else {
-          console.log('[WhatsApp Auth Reset] Cleared all auth state credentials.');
-          resolve();
-        }
-      });
-    });
+    await targetDb.query('DELETE FROM whatsapp_auth_state');
+    console.log('[WhatsApp Auth Reset] Cleared all auth state credentials.');
 
     // Connect with a fresh session
     await connectToWhatsApp(targetDb);
