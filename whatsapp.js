@@ -1,4 +1,4 @@
-import makeWASocket, { DisconnectReason, proto, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, proto, fetchLatestWaWebVersion, Browsers } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { initAuthCreds } from '@whiskeysockets/baileys/lib/Utils/auth-utils.js';
@@ -43,7 +43,6 @@ export async function usePgAuthState(db) {
     }
   };
 
-
   const creds = (await readData('creds')) || initAuthCreds();
 
   return {
@@ -64,17 +63,19 @@ export async function usePgAuthState(db) {
           return data;
         },
         set: async (data) => {
+          const tasks = [];
           for (const category in data) {
             for (const id in data[category]) {
               const value = data[category][id];
               const key = `${category}-${id}`;
               if (value) {
-                await writeData(value, key);
+                tasks.push(writeData(value, key));
               } else {
-                await removeData(key);
+                tasks.push(removeData(key));
               }
             }
           }
+          await Promise.all(tasks);
         }
       }
     },
@@ -105,7 +106,8 @@ export async function connectToWhatsApp(db) {
     try {
       sock.ev.removeAllListeners('connection.update');
       sock.ev.removeAllListeners('creds.update');
-      sock.end(new Error('Reconnecting'));
+      sock.ev.removeAllListeners('messages.upsert');
+      sock.end(undefined);
     } catch (err) {
       // Ignore
     }
@@ -116,17 +118,31 @@ export async function connectToWhatsApp(db) {
     const { state, saveCreds } = await usePgAuthState(database);
     const makeWASocketFn = makeWASocket.default || makeWASocket;
 
-    const { version, isLatest } = await fetchLatestWaWebVersion();
-    console.log(`[WhatsApp] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+    let version = [2, 3000, 1015901307];
+    try {
+      const waVersion = await fetchLatestWaWebVersion();
+      if (waVersion && waVersion.version) {
+        version = waVersion.version;
+        console.log(`[WhatsApp] Using WA Web v${version.join('.')}, isLatest: ${waVersion.isLatest}`);
+      }
+    } catch (vErr) {
+      console.warn('[WhatsApp] Could not fetch latest WA Web version, using fallback:', vErr.message);
+    }
+
+    const browserConfig = Browsers ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '120.0.0.0'];
 
     sock = makeWASocketFn({
       version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      browser: browserConfig,
+      keepAliveIntervalMs: 30000,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
       syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false
+      shouldSyncHistoryMessage: () => false,
+      markOnlineOnConnect: true
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -153,6 +169,8 @@ export async function connectToWhatsApp(db) {
 
         if (shouldReconnect) {
           reconnectTimeout = setTimeout(() => connectToWhatsApp(), 5000);
+        } else {
+          console.warn('[WhatsApp] Session logged out by WhatsApp server or phone. New QR scan required.');
         }
       } else if (connection === 'open') {
         console.log('====================================================');
@@ -173,7 +191,6 @@ export async function connectToWhatsApp(db) {
       const senderJid = msg.key.remoteJid;
 
       // SAFETY CHECK 1: Only reply to direct individual chats (ends with @s.whatsapp.net)
-      // Exclude group chats (@g.us), status updates (@broadcast), and other system JIDs (@lid, etc.)
       if (!senderJid || !senderJid.endsWith('@s.whatsapp.net')) {
         return;
       }
@@ -207,8 +224,6 @@ export async function connectToWhatsApp(db) {
         console.error('[WhatsApp] Failed to send auto-reply:', err.message);
       }
     });
-
-    sock.ev.on('creds.update', saveCreds);
   } catch (err) {
     console.error('Failed to initialize Baileys WhatsApp client:', err.message);
     reconnectTimeout = setTimeout(() => connectToWhatsApp(), 5000);
