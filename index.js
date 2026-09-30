@@ -373,52 +373,29 @@ app.post('/api/gallery', async (req, res) => {
     return res.status(400).json({ error: 'ID and URL are required.' });
   }
 
-  let fileUrl = url;
-  
-  // If url is base64, save it as a file
-  if (url.startsWith('data:')) {
-    try {
-      const matches = url.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-      if (matches && matches.length === 3) {
-        const type = matches[1];
-        const data = Buffer.from(matches[2], 'base64');
-        
-        let ext = 'webp';
-        if (type.includes('png')) ext = 'png';
-        else if (type.includes('jpeg') || type.includes('jpg')) ext = 'jpg';
-        else if (type.includes('mp4')) ext = 'mp4';
-        else if (type.includes('webm')) ext = 'webm';
-        
-        const filename = `${id}.${ext}`;
-        const filepath = path.join(__dirname, 'uploads', 'gallery', filename);
-        
-        fs.writeFileSync(filepath, data);
-        fileUrl = `/uploads/gallery/${filename}`;
-      }
-    } catch (err) {
-      console.error('Error saving base64 image to file:', err);
-      return res.status(500).json({ error: 'Failed to process image file.' });
-    }
-  }
-
   try {
-    const query = 'INSERT INTO gallery_images (id, title, category, url) VALUES ($1, $2, $3, $4)';
-    const params = [id, title || 'Untitled', category || 'General', fileUrl];
+    const query = `
+      INSERT INTO gallery_images (id, title, category, url) 
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (id) DO UPDATE 
+      SET title = EXCLUDED.title, category = EXCLUDED.category, url = EXCLUDED.url
+    `;
+    const params = [id, title || 'Untitled', category || 'General', url];
     await pool.query(query, params);
 
     res.status(201).json({ 
       success: true, 
-      message: 'Image uploaded successfully.',
+      message: 'Image saved directly to database successfully.',
       photo: {
         id,
         title: title || 'Untitled',
         category: category || 'General',
-        url: fileUrl
+        url: url
       }
     });
   } catch (err) {
-    console.error('Error inserting gallery image:', err.message);
-    res.status(500).json({ error: 'Failed to save gallery image.' });
+    console.error('Error inserting gallery image into database:', err.message);
+    res.status(500).json({ error: 'Failed to save gallery image to database.' });
   }
 });
 
@@ -427,23 +404,12 @@ app.delete('/api/gallery/:id', async (req, res) => {
   const { id } = req.params;
   
   try {
-    const { rows } = await pool.query('SELECT url FROM gallery_images WHERE id = $1', [id]);
-    if (rows.length > 0 && rows[0].url && rows[0].url.startsWith('/uploads/')) {
-      try {
-        const filepath = path.join(__dirname, rows[0].url);
-        if (fs.existsSync(filepath)) {
-          fs.unlinkSync(filepath);
-        }
-      } catch (fileErr) {
-        console.error('Error deleting image file:', fileErr);
-      }
-    }
-
     const result = await pool.query('DELETE FROM gallery_images WHERE id = $1', [id]);
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Gallery image not found.' });
     }
-    res.json({ success: true, message: 'Image deleted successfully.' });
+
+    res.json({ success: true, message: 'Gallery image deleted successfully from database.' });
   } catch (err) {
     console.error('Error deleting gallery image:', err.message);
     res.status(500).json({ error: 'Failed to delete gallery image.' });
