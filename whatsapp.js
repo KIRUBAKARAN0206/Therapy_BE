@@ -95,10 +95,27 @@ export async function connectToWhatsApp(db) {
     return;
   }
 
-  // Clear any existing reconnect timeout
+let keepAliveTimer = null;
+let reconnectAttempts = 0;
+
+export async function connectToWhatsApp(db) {
+  if (db) {
+    database = db;
+  }
+
+  if (!database) {
+    console.error('Database not initialized for WhatsApp bot.');
+    return;
+  }
+
+  // Clear any existing timers
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
+  }
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
   }
 
   // Clean up old socket connection
@@ -137,15 +154,25 @@ export async function connectToWhatsApp(db) {
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       browser: browserConfig,
-      keepAliveIntervalMs: 30000,
+      keepAliveIntervalMs: 15000,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 0,
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,
-      markOnlineOnConnect: true
+      markOnlineOnConnect: true,
+      retryRequestOptions: {
+        maxRetries: 5,
+        delayMs: 2000
+      }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+      try {
+        await saveCreds();
+      } catch (err) {
+        console.warn('[WhatsApp Creds] Failed to save creds to PostgreSQL:', err.message);
+      }
+    });
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -161,23 +188,40 @@ export async function connectToWhatsApp(db) {
 
       if (connection === 'close') {
         isConnected = false;
+        if (keepAliveTimer) {
+          clearInterval(keepAliveTimer);
+          keepAliveTimer = null;
+        }
+
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log(`WhatsApp connection closed (status code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+        console.log(`[WhatsApp Status] Connection closed (status code: ${statusCode}). Attempting persistent auto-reconnect...`);
         
         currentQr = null;
 
-        if (shouldReconnect) {
-          reconnectTimeout = setTimeout(() => connectToWhatsApp(), 5000);
-        } else {
-          console.warn('[WhatsApp] Session logged out by WhatsApp server or phone. New QR scan required.');
-        }
+        // Auto-reconnect indefinitely unless explicit logout was triggered
+        reconnectAttempts++;
+        const backoffDelay = Math.min(3000 * Math.pow(1.2, reconnectAttempts), 30000);
+        console.log(`[WhatsApp Reconnect] Reconnecting in ${(backoffDelay / 1000).toFixed(1)}s (Attempt #${reconnectAttempts})...`);
+        
+        reconnectTimeout = setTimeout(() => connectToWhatsApp(), backoffDelay);
       } else if (connection === 'open') {
         console.log('====================================================');
         console.log('✅ WHATSAPP NOTIFICATION BOT CONNECTED SUCCESSFULLY!');
         console.log('====================================================');
         isConnected = true;
         currentQr = null;
+        reconnectAttempts = 0; // Reset counter on successful connection
+
+        // Active Heartbeat keep-alive every 20 seconds to prevent connection drops
+        keepAliveTimer = setInterval(async () => {
+          if (sock && isConnected) {
+            try {
+              await sock.sendPresenceUpdate('available');
+            } catch (pErr) {
+              console.warn('[WhatsApp KeepAlive] Heartbeat presence ping warning:', pErr.message);
+            }
+          }
+        }, 20000);
       }
     });
 
@@ -226,7 +270,9 @@ export async function connectToWhatsApp(db) {
     });
   } catch (err) {
     console.error('Failed to initialize Baileys WhatsApp client:', err.message);
-    reconnectTimeout = setTimeout(() => connectToWhatsApp(), 5000);
+    reconnectAttempts++;
+    const backoffDelay = Math.min(3000 * Math.pow(1.2, reconnectAttempts), 30000);
+    reconnectTimeout = setTimeout(() => connectToWhatsApp(), backoffDelay);
   }
 }
 
