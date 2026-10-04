@@ -6,9 +6,11 @@ import { BufferJSON } from '@whiskeysockets/baileys/lib/Utils/generics.js';
 
 let sock = null;
 let isConnected = false;
+let isAuthenticatedSession = false;
 let currentQr = null;
 let database = null;
 let reconnectTimeout = null;
+let reconnectAttempts = 0;
 
 // Helper to wrap Baileys PostgreSQL Authentication State
 export async function usePgAuthState(db) {
@@ -95,27 +97,10 @@ export async function connectToWhatsApp(db) {
     return;
   }
 
-let keepAliveTimer = null;
-let reconnectAttempts = 0;
-
-export async function connectToWhatsApp(db) {
-  if (db) {
-    database = db;
-  }
-
-  if (!database) {
-    console.error('Database not initialized for WhatsApp bot.');
-    return;
-  }
-
-  // Clear any existing timers
+  // Clear any pending reconnect timers
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
-  }
-  if (keepAliveTimer) {
-    clearInterval(keepAliveTimer);
-    keepAliveTimer = null;
   }
 
   // Clean up old socket connection
@@ -133,6 +118,12 @@ export async function connectToWhatsApp(db) {
 
   try {
     const { state, saveCreds } = await usePgAuthState(database);
+
+    // Check if valid credentials already exist in DB
+    if (state.creds && state.creds.me && state.creds.me.id) {
+      isAuthenticatedSession = true;
+    }
+
     const makeWASocketFn = makeWASocket.default || makeWASocket;
 
     let version = [2, 3000, 1015901307];
@@ -140,7 +131,6 @@ export async function connectToWhatsApp(db) {
       const waVersion = await fetchLatestWaWebVersion();
       if (waVersion && waVersion.version) {
         version = waVersion.version;
-        console.log(`[WhatsApp] Using WA Web v${version.join('.')}, isLatest: ${waVersion.isLatest}`);
       }
     } catch (vErr) {
       console.warn('[WhatsApp] Could not fetch latest WA Web version, using fallback:', vErr.message);
@@ -154,7 +144,7 @@ export async function connectToWhatsApp(db) {
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       browser: browserConfig,
-      keepAliveIntervalMs: 15000,
+      keepAliveIntervalMs: 25000,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 0,
       syncFullHistory: false,
@@ -169,6 +159,9 @@ export async function connectToWhatsApp(db) {
     sock.ev.on('creds.update', async () => {
       try {
         await saveCreds();
+        if (state.creds && state.creds.me && state.creds.me.id) {
+          isAuthenticatedSession = true;
+        }
       } catch (err) {
         console.warn('[WhatsApp Creds] Failed to save creds to PostgreSQL:', err.message);
       }
@@ -176,8 +169,8 @@ export async function connectToWhatsApp(db) {
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
-      
-      if (qr) {
+
+      if (qr && !isAuthenticatedSession) {
         currentQr = qr;
         console.log('\n==================================================================');
         console.log('SCAN QR CODE BELOW TO CONNECT THE CLINIC WHATSAPP NOTIFICATION BOT:');
@@ -188,47 +181,42 @@ export async function connectToWhatsApp(db) {
 
       if (connection === 'close') {
         isConnected = false;
-        if (keepAliveTimer) {
-          clearInterval(keepAliveTimer);
-          keepAliveTimer = null;
-        }
-
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        console.log(`[WhatsApp Status] Connection closed (status code: ${statusCode}). Attempting persistent auto-reconnect...`);
-        
-        currentQr = null;
+        console.log(`[WhatsApp Status] Connection closed (status code: ${statusCode}).`);
 
-        // Auto-reconnect indefinitely unless explicit logout was triggered
-        reconnectAttempts++;
-        const backoffDelay = Math.min(3000 * Math.pow(1.2, reconnectAttempts), 30000);
-        console.log(`[WhatsApp Reconnect] Reconnecting in ${(backoffDelay / 1000).toFixed(1)}s (Attempt #${reconnectAttempts})...`);
-        
-        reconnectTimeout = setTimeout(() => connectToWhatsApp(), backoffDelay);
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
+        if (isLoggedOut) {
+          console.warn('[WhatsApp] User logged out from WhatsApp on phone. Resetting auth credentials...');
+          isAuthenticatedSession = false;
+          currentQr = null;
+          try {
+            await database.query('DELETE FROM whatsapp_auth_state');
+          } catch (e) {}
+          reconnectAttempts = 0;
+          reconnectTimeout = setTimeout(() => connectToWhatsApp(), 3000);
+        } else {
+          // Temporary network drop / socket restart -> Maintain authenticated session state & auto-reconnect silently
+          reconnectAttempts++;
+          const backoffDelay = Math.min(2000 * Math.pow(1.2, reconnectAttempts), 15000);
+          console.log(`[WhatsApp Auto-Reconnect] Silently reconnecting socket in ${(backoffDelay / 1000).toFixed(1)}s (Attempt #${reconnectAttempts})...`);
+          reconnectTimeout = setTimeout(() => connectToWhatsApp(), backoffDelay);
+        }
       } else if (connection === 'open') {
         console.log('====================================================');
         console.log('✅ WHATSAPP NOTIFICATION BOT CONNECTED SUCCESSFULLY!');
         console.log('====================================================');
         isConnected = true;
+        isAuthenticatedSession = true;
         currentQr = null;
-        reconnectAttempts = 0; // Reset counter on successful connection
-
-        // Active Heartbeat keep-alive every 20 seconds to prevent connection drops
-        keepAliveTimer = setInterval(async () => {
-          if (sock && isConnected) {
-            try {
-              await sock.sendPresenceUpdate('available');
-            } catch (pErr) {
-              console.warn('[WhatsApp KeepAlive] Heartbeat presence ping warning:', pErr.message);
-            }
-          }
-        }, 20000);
+        reconnectAttempts = 0;
       }
     });
 
     // Handle messages upsert (Auto-reply to customer queries)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
-      
+
       const msg = messages[0];
       if (!msg.message || msg.key.fromMe) return;
 
@@ -247,20 +235,20 @@ export async function connectToWhatsApp(db) {
       }
 
       // SAFETY CHECK 3: Ensure the message contains text content
-      const messageContent = msg.message.conversation || 
-                            msg.message.extendedTextMessage?.text || 
-                            msg.message.imageMessage?.caption || 
-                            msg.message.videoMessage?.caption;
-                            
+      const messageContent = msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption;
+
       if (!messageContent) {
         return;
       }
-      
-      const replyText = 
+
+      const replyText =
         `Hello! 👋 Welcome to *THE THERAPY UNIVERSE*.\n\n` +
         `We have received your message. Our specialist team will review it and get back to you shortly!\n\n` +
         `To book an appointment directly, please visit our website: http://localhost:5174/#/booking`;
-      
+
       try {
         await sock.sendMessage(senderJid, { text: replyText });
         console.log(`[WhatsApp] Auto-reply dispatched to sender: ${senderJid}`);
@@ -271,12 +259,24 @@ export async function connectToWhatsApp(db) {
   } catch (err) {
     console.error('Failed to initialize Baileys WhatsApp client:', err.message);
     reconnectAttempts++;
-    const backoffDelay = Math.min(3000 * Math.pow(1.2, reconnectAttempts), 30000);
+    const backoffDelay = Math.min(3000 * Math.pow(1.2, reconnectAttempts), 15000);
     reconnectTimeout = setTimeout(() => connectToWhatsApp(), backoffDelay);
   }
 }
 
 export async function sendWhatsAppNotification(toPhone, message) {
+  if (!database) {
+    console.warn('Database not initialized for WhatsApp bot.');
+    return false;
+  }
+
+  // Wait up to 5 seconds if socket is currently reconnecting
+  let attempts = 0;
+  while ((!sock || !isConnected) && isAuthenticatedSession && attempts < 5) {
+    attempts++;
+    await new Promise(res => setTimeout(res, 1000));
+  }
+
   if (!sock || !isConnected) {
     console.warn('\n⚠️ WhatsApp notification alert skipped. WhatsApp bot is offline or scanning is pending.');
     console.warn('Dispatch payload:\n', message, '\n');
@@ -284,7 +284,6 @@ export async function sendWhatsAppNotification(toPhone, message) {
   }
 
   try {
-    // Format recipient phone number to JID format
     let cleanPhone = toPhone.replace(/[^0-9]/g, '');
     if (!cleanPhone.startsWith('91') && cleanPhone.length === 10) {
       cleanPhone = '91' + cleanPhone;
@@ -301,9 +300,11 @@ export async function sendWhatsAppNotification(toPhone, message) {
 }
 
 export function getWhatsAppStatus() {
+  const connected = isConnected || isAuthenticatedSession;
   return {
-    isConnected,
-    qrCode: isConnected ? null : currentQr
+    isConnected: connected,
+    socketStatus: isConnected ? 'open' : (isAuthenticatedSession ? 'reconnecting' : 'disconnected'),
+    qrCode: connected ? null : currentQr
   };
 }
 
@@ -314,13 +315,11 @@ export async function resetWhatsAppAuth(db) {
     return false;
   }
 
-  // Clear any existing reconnect timeout
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
   }
 
-  // Clean up old socket connection
   if (sock) {
     try {
       sock.ev.removeAllListeners('connection.update');
@@ -333,14 +332,12 @@ export async function resetWhatsAppAuth(db) {
   }
 
   isConnected = false;
+  isAuthenticatedSession = false;
   currentQr = null;
 
   try {
-    // Clear whatsapp_auth_state table completely
     await targetDb.query('DELETE FROM whatsapp_auth_state');
     console.log('[WhatsApp Auth Reset] Cleared all auth state credentials.');
-
-    // Connect with a fresh session
     await connectToWhatsApp(targetDb);
     return true;
   } catch (err) {
